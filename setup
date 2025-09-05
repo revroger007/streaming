@@ -29,6 +29,8 @@ sudo ufw status verbose
 
 #This will download and make the SRTLA server:
 
+sudo rm -rf srt srtla
+
 sudo git clone https://github.com/BELABOX/srtla.git
 cd srtla
 sudo make
