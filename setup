@@ -1,6 +1,6 @@
 
 sudo apt update && sudo apt upgrade -y
-sudo apt install tclsh pkg-config libssl-dev build-essential make cmake tcl openssl zlib1g-dev gcc perl net-tools nano ssh git zip unzip install ffmpeg net-tools ufw -y
+sudo apt install tclsh pkg-config libssl-dev build-essential make cmake tcl openssl zlib1g-dev gcc perl net-tools nano ssh git zip unzip install ffmpeg net-tools ufw apt-transport-https ca-certificates curl software-properties-common -y
 sudo ufw --force reset
 
 # Set default policies
@@ -27,7 +27,6 @@ sudo ufw --force enable
 # Check status
 sudo ufw status verbose
 
-
 #This will download and make the SRTLA server:
 
 sudo git clone https://github.com/BELABOX/srtla.git
@@ -41,66 +40,6 @@ sudo git clone https://github.com/BELABOX/srt.git
 cd srt
 sudo ./configure
 sudo make
-
-
-
-
-===========
-#This command will start the SRTLA receiver and SRT transmitter. This assumes you have downloaded it under the root srtuser directory. This will also set the SRTLA receiver to listen in on port 5000, which is what you would point the Belabox to, and it will set the SRT transmitter to listen in on port 5001, which is what you would point VLC Player to:
-
-/root/srt/srt-live-transmit -st:yes "srt://127.0.0.1:5002?mode=listener&lossmaxttl=40&latency=2000" "srt://0.0.0.0:5001?mode=listener" & /root/srtla/srtla_rec 5000 127.0.0.1 5002
-
-
-#================================================================================================================
-# Metode 1, Service untuk SRTLA Receiver & Service untuk SRT Transmitter digabung
-#================================================================================================================
-
-# Create service file
-
-sudo tee /etc/systemd/system/srtla-server.service > /dev/null << 'EOF'
-[Unit]
-Description=SRTLA Server
-After=network.target
-
-[Service]
-Type=simple
-User=root
-WorkingDirectory=/root
-ExecStart=/bin/bash -c '/root/srt/srt-live-transmit -st:yes "srt://127.0.0.1:5002?mode=listener&lossmaxttl=40&latency=2000" "srt://0.0.0.0:5001?mode=listener" & /root/srtla/srtla_rec 5000 127.0.0.1 5002'
-Restart=always
-RestartSec=10
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-================
-
-# Reload systemd
-# sudo systemctl daemon-reload
-
-# Enable service at boot
-# sudo systemctl enable srtla-server
-
-# Start service
-# sudo systemctl start srtla-server
-
-# Check status
-# sudo systemctl status srtla-server
-
-# sudo systemctl stop srtla-server
-# sudo systemctl disable srtla-server
-
-
-
-
-#================================================================================================================
-# Metode 2, service dibagi menjadi 2
-# 1. Service untuk SRTLA Receiver
-# 2. Service untuk SRT Transmitter
-#================================================================================================================
-
-# 1. Service untuk SRTLA Receiver
 
 sudo tee /etc/systemd/system/srtla-rec.service > /dev/null << 'EOF'
 [Unit]
@@ -118,60 +57,6 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 EOF
-
-
-# 2. Service untuk SRT Transmitter
-
-sudo tee /etc/systemd/system/srt-transmit.service > /dev/null << 'EOF'
-[Unit]
-Description=SRT Transmitter (Relay SRTLA -> VLC/OBS)
-After=network.target
-Requires=srtla-rec.service
-
-[Service]
-Type=simple
-User=root
-WorkingDirectory=/root/srt
-ExecStart=/root/srt/srt-live-transmit -st:yes "srt://127.0.0.1:5002?mode=listener&lossmaxttl=40&latency=2000" "srt://0.0.0.0:5001?mode=listener"
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-# 3. Reload & Enable
-
-sudo systemctl daemon-reload
-sudo systemctl enable srtla-rec
-sudo systemctl enable srt-transmit
-
-sudo systemctl start srtla-rec
-sudo systemctl start srt-transmit
-
-sudo systemctl stop srt-transmit
-
-# sudo systemctl start srt-rhei
-
-# 4. Cek Status
-sudo systemctl status srtla-rec
-sudo systemctl status srt-transmit
-
-
-#===================================
-# Pengecekan :
-# Coba akses srt://<IP VPS>:5001 menggunakan vlc, harusnya sudah ok
-#===================================
-
-
-#================================================================================================================
-# Pengembangan selanjutnya : 
-# 1. Service untuk SRTLA Receiver
-# 2. Service untuk SRT Transmitter dimatikan, diganti dengan SRT Transmitter to Restreamer
-#================================================================================================================
-
-sudo systemctl disable srt-transmit
-sudo systemctl stop srt-transmit
 
 # Kemudian buat service dengan nama srt-rhei, untuk transmisi ke datarhei restreamer
 
@@ -196,21 +81,68 @@ WantedBy=multi-user.target
 
 EOF
 
-# test manual tanpa systemd
-
-/root/srt/srt-live-transmit -st:yes "srt://127.0.0.1:5002?mode=listener&latency=2000" "srt://127.0.0.1:6000?mode=caller"
-
-#Lalu cek di Restreamer apakah stream bisa terbaca. Kalau sukses, baru aktifkan service systemd.
-
-
 #
 sudo systemctl daemon-reload
 sudo systemctl enable srt-rhei
 sudo systemctl restart srt-rhei
 sudo systemctl status srt-rhei
 
-
 #pada datarhei, gunakan source : srt,
 # network source : srt://:6000?mode=listener
 
+#Install Docker
 
+#Install all required dependency packages.
+sudo apt install apt-transport-https ca-certificates curl software-properties-common -y
+
+#Add the Docker GPG key to your server's keyring.
+sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+
+#Add the latest Docker repository to your APT sources.
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+#Update the server package index.
+sudo apt update
+
+#Install Docker.
+sudo apt-get install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin -y
+
+#Manage the Docker System Service
+#Enable the system service to start automatically at boot time.
+
+sudo systemctl enable docker
+
+#View the Docker service status and verify that it's running.
+
+sudo systemctl status docker
+
+#Buat file : /opt/restreamer/docker-compose.yml
+
+# Buat direktori
+mkdir -p /opt/restreamer
+
+# Buat file docker-compose.yml
+cat > /opt/restreamer/docker-compose.yml << 'EOF'
+version: '3.8'
+
+services:
+  restreamer:
+    image: datarhei/restreamer:latest
+    container_name: restreamer
+    restart: unless-stopped
+    privileged: true
+    volumes:
+      - /opt/core/config:/core/config
+      - /opt/core/data:/core/data
+    ports:
+      - "8080:8080"
+      - "8181:8181"
+      - "1935:1935"
+      - "5001:5001"
+      - "1936:1936"
+      - "6000:6000/udp"
+EOF
+
+Kemudian jalankan : 
+cd /opt/restreamer
+docker compose up -d
