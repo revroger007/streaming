@@ -1,6 +1,6 @@
 
 sudo apt update && sudo apt upgrade -y
-sudo apt install tclsh pkg-config libssl-dev build-essential make cmake tcl openssl zlib1g-dev gcc perl net-tools nano ssh git zip unzip install ffmpeg net-tools ufw apt-transport-https ca-certificates curl software-properties-common -y
+sudo apt install tclsh pkg-config libssl-dev build-essential make cmake tcl openssl zlib1g-dev gcc perl net-tools nano ssh git zip unzip ffmpeg net-tools ufw apt-transport-https ca-certificates curl software-properties-common -y
 sudo ufw --force reset
 
 # Set default policies
@@ -12,7 +12,7 @@ sudo ufw allow ssh
 
 # Allow SRTLA ports - menggunakan port yang benar
 sudo ufw allow 5000/udp comment 'SRTLA Input'
-sudo ufw allow 1935/udp comment 'SRT Output'
+sudo ufw allow 1935/tcp comment 'RTMP Output'
 
 sudo ufw allow 5001/udp comment 'SRT Output'
 sudo ufw allow 5002/udp comment 'SRT Output'
@@ -64,7 +64,7 @@ sudo tee /etc/systemd/system/srt-rhei.service > /dev/null << 'EOF'
 [Unit]
 Description=SRT Transmitter to Restreamer
 After=network.target
-Requires=srtla-server.service
+Requires=srtla-rec.service
 
 [Service]
 Type=simple
@@ -96,6 +96,8 @@ sudo systemctl status srt-rhei
 sudo apt install apt-transport-https ca-certificates curl software-properties-common -y
 
 #Add the Docker GPG key to your server's keyring.
+sudo mkdir -p /etc/apt/keyrings
+sudo chmod 0755 /etc/apt/keyrings
 sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
 
 #Add the latest Docker repository to your APT sources.
