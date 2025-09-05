@@ -147,6 +147,9 @@ services:
       - "6000:6000/udp"
 EOF
 
-Kemudian jalankan : 
+
+mkdir -p /opt/core/config /opt/core/data
+
+#Kemudian jalankan : 
 cd /opt/restreamer
 docker compose up -d
