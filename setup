@@ -1,0 +1,216 @@
+
+sudo apt update && sudo apt upgrade -y
+sudo apt install tclsh pkg-config libssl-dev build-essential make cmake tcl openssl zlib1g-dev gcc perl net-tools nano ssh git zip unzip install ffmpeg net-tools ufw -y
+sudo ufw --force reset
+
+# Set default policies
+sudo ufw default deny incoming
+sudo ufw default allow outgoing
+
+# Allow SSH
+sudo ufw allow ssh
+
+# Allow SRTLA ports - menggunakan port yang benar
+sudo ufw allow 5000/udp comment 'SRTLA Input'
+sudo ufw allow 1935/udp comment 'SRT Output'
+
+sudo ufw allow 5001/udp comment 'SRT Output'
+sudo ufw allow 5002/udp comment 'SRT Output'
+
+# Allow HTTP/HTTPS for WebUI (versi 2)
+sudo ufw allow 8080/tcp comment 'WebUI'
+sudo ufw allow 9090/tcp comment 'Monitoring'
+
+# Enable firewall
+sudo ufw --force enable
+
+# Check status
+sudo ufw status verbose
+
+
+#This will download and make the SRTLA server:
+
+sudo git clone https://github.com/BELABOX/srtla.git
+cd srtla
+sudo make
+cd ../
+
+#This will install, configure, and make the SRT server:
+
+sudo git clone https://github.com/BELABOX/srt.git
+cd srt
+sudo ./configure
+sudo make
+
+
+
+
+===========
+#This command will start the SRTLA receiver and SRT transmitter. This assumes you have downloaded it under the root srtuser directory. This will also set the SRTLA receiver to listen in on port 5000, which is what you would point the Belabox to, and it will set the SRT transmitter to listen in on port 5001, which is what you would point VLC Player to:
+
+/root/srt/srt-live-transmit -st:yes "srt://127.0.0.1:5002?mode=listener&lossmaxttl=40&latency=2000" "srt://0.0.0.0:5001?mode=listener" & /root/srtla/srtla_rec 5000 127.0.0.1 5002
+
+
+#================================================================================================================
+# Metode 1, Service untuk SRTLA Receiver & Service untuk SRT Transmitter digabung
+#================================================================================================================
+
+# Create service file
+
+sudo tee /etc/systemd/system/srtla-server.service > /dev/null << 'EOF'
+[Unit]
+Description=SRTLA Server
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root
+ExecStart=/bin/bash -c '/root/srt/srt-live-transmit -st:yes "srt://127.0.0.1:5002?mode=listener&lossmaxttl=40&latency=2000" "srt://0.0.0.0:5001?mode=listener" & /root/srtla/srtla_rec 5000 127.0.0.1 5002'
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+================
+
+# Reload systemd
+# sudo systemctl daemon-reload
+
+# Enable service at boot
+# sudo systemctl enable srtla-server
+
+# Start service
+# sudo systemctl start srtla-server
+
+# Check status
+# sudo systemctl status srtla-server
+
+# sudo systemctl stop srtla-server
+# sudo systemctl disable srtla-server
+
+
+
+
+#================================================================================================================
+# Metode 2, service dibagi menjadi 2
+# 1. Service untuk SRTLA Receiver
+# 2. Service untuk SRT Transmitter
+#================================================================================================================
+
+# 1. Service untuk SRTLA Receiver
+
+sudo tee /etc/systemd/system/srtla-rec.service > /dev/null << 'EOF'
+[Unit]
+Description=SRTLA Receiver (Belabox Input)
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/srtla
+ExecStart=/root/srtla/srtla_rec 5000 127.0.0.1 5002
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+
+# 2. Service untuk SRT Transmitter
+
+sudo tee /etc/systemd/system/srt-transmit.service > /dev/null << 'EOF'
+[Unit]
+Description=SRT Transmitter (Relay SRTLA -> VLC/OBS)
+After=network.target
+Requires=srtla-rec.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/srt
+ExecStart=/root/srt/srt-live-transmit -st:yes "srt://127.0.0.1:5002?mode=listener&lossmaxttl=40&latency=2000" "srt://0.0.0.0:5001?mode=listener"
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# 3. Reload & Enable
+
+sudo systemctl daemon-reload
+sudo systemctl enable srtla-rec
+sudo systemctl enable srt-transmit
+
+sudo systemctl start srtla-rec
+sudo systemctl start srt-transmit
+
+sudo systemctl stop srt-transmit
+
+# sudo systemctl start srt-rhei
+
+# 4. Cek Status
+sudo systemctl status srtla-rec
+sudo systemctl status srt-transmit
+
+
+#===================================
+# Pengecekan :
+# Coba akses srt://<IP VPS>:5001 menggunakan vlc, harusnya sudah ok
+#===================================
+
+
+#================================================================================================================
+# Pengembangan selanjutnya : 
+# 1. Service untuk SRTLA Receiver
+# 2. Service untuk SRT Transmitter dimatikan, diganti dengan SRT Transmitter to Restreamer
+#================================================================================================================
+
+sudo systemctl disable srt-transmit
+sudo systemctl stop srt-transmit
+
+# Kemudian buat service dengan nama srt-rhei, untuk transmisi ke datarhei restreamer
+
+sudo tee /etc/systemd/system/srt-rhei.service > /dev/null << 'EOF'
+[Unit]
+Description=SRT Transmitter to Restreamer
+After=network.target
+Requires=srtla-server.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/srt
+ExecStart=/root/srt/srt-live-transmit -st:yes \
+  "srt://127.0.0.1:5002?mode=listener&latency=2000" \
+  "srt://127.0.0.1:6000?mode=caller"
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+
+EOF
+
+# test manual tanpa systemd
+
+/root/srt/srt-live-transmit -st:yes "srt://127.0.0.1:5002?mode=listener&latency=2000" "srt://127.0.0.1:6000?mode=caller"
+
+#Lalu cek di Restreamer apakah stream bisa terbaca. Kalau sukses, baru aktifkan service systemd.
+
+
+#
+sudo systemctl daemon-reload
+sudo systemctl enable srt-rhei
+sudo systemctl restart srt-rhei
+sudo systemctl status srt-rhei
+
+
+#pada datarhei, gunakan source : srt,
+# network source : srt://:6000?mode=listener
+
+
