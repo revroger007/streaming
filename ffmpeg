@@ -1,0 +1,141 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Nama container & image
+CONTAINER_NAME="ffmpeg"
+IMAGE_NAME="restream-ffmpeg-srt:latest"
+
+# Host folder mount otomatis berdasarkan nama container
+HOST_ASSETS_DIR="/opt/docker-${CONTAINER_NAME}-assets"
+
+# buat folder host jika belum ada
+mkdir -p "$HOST_ASSETS_DIR"
+
+echo "[*] Membuat Dockerfile & entrypoint.sh..."
+
+# Dockerfile minimal
+cat > Dockerfile <<'EOF'
+FROM ubuntu:22.04
+
+RUN apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      ffmpeg srt-tools curl ca-certificates tzdata && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN mkdir -p /assets
+
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+EXPOSE 6000/udp
+
+ENTRYPOINT ["/entrypoint.sh"]
+EOF
+
+# entrypoint.sh
+cat > entrypoint.sh <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+WATERMARK="/assets/watermark.png"
+FAILOVER="/assets/failover.mp4"
+
+download_assets() {
+  echo "[*] Downloading/Updating assets..."
+  curl -L -o "$WATERMARK" \
+    "https://raw.githubusercontent.com/revroger007/streaming/refs/heads/main/assets/logo-watermark-git.png"
+  curl -L -o "$FAILOVER" \
+    "https://github.com/revroger007/streaming/raw/refs/heads/main/assets/failover.mp4"
+}
+
+if [[ "${1:-}" == "--redownload" ]]; then
+  download_assets
+  echo "[*] Assets berhasil di-redownload."
+  exit 0
+fi
+
+[ -f "$WATERMARK" ] || download_assets
+[ -f "$FAILOVER" ] || download_assets
+
+build_filter() {
+  echo "[0:v]scale=2560:1440:force_original_aspect_ratio=decrease,\
+pad=2560:1440:(ow-iw)/2:(oh-ih)/2,\
+fps=60[v0];\
+[1:v]format=rgba[wm];\
+[v0][wm]overlay=W-w-40:H-h-95:format=auto:eval=init[vout]"
+}
+
+common_out_args=(
+  -map "[vout]" -map 0:a?
+  -c:v libx264 -preset veryfast -tune zerolatency -profile:v high -level 5.2
+  -pix_fmt yuv420p -g 120
+  -b:v 20M -maxrate 20M -bufsize 40M
+  -c:a aac -b:a 160k -ar 48000 -ac 2
+  -f mpegts
+  "srt://127.0.0.1:6002?mode=caller&transtype=live"
+)
+
+run_primary() {
+  echo "[*] Menjalankan PRIMARY dari SRT listener :6000 → caller 127.0.0.1:6002..."
+  ffmpeg -hide_banner -loglevel warning \
+    -i "srt://0.0.0.0:6000?mode=listener&peer_idle_timeout=5000" \
+    -loop 1 -i "$WATERMARK" \
+    -filter_complex "$(build_filter)" \
+    "${common_out_args[@]}"
+}
+
+run_failover() {
+  echo "[*] Menjalankan FAILOVER (loop file) → caller 127.0.0.1:6002..."
+  ffmpeg -hide_banner -loglevel warning \
+    -stream_loop -1 -re -i "$FAILOVER" \
+    -loop 1 -i "$WATERMARK" \
+    -filter_complex "$(build_filter)" \
+    "${common_out_args[@]}"
+}
+
+while true; do
+  if run_primary; then
+    echo "[*] PRIMARY berhenti normal, akan mencoba lagi..."
+  else
+    echo "[!] PRIMARY terhenti → beralih ke FAILOVER."
+  fi
+
+  run_failover_pid=""
+  run_failover &
+  run_failover_pid=$!
+
+  while kill -0 "$run_failover_pid" 2>/dev/null; do
+    if ffprobe -v error -timeout 5000000 \
+      -i "srt://0.0.0.0:6000?mode=listener&listen_timeout=5000" >/dev/null 2>&1; then
+      echo "[*] Sumber SRT terdeteksi kembali. Switching ke PRIMARY..."
+      kill -TERM "$run_failover_pid" 2>/dev/null || true
+      wait "$run_failover_pid" 2>/dev/null || true
+      break
+    fi
+    sleep 2
+  done
+done
+EOF
+
+chmod +x entrypoint.sh
+
+echo "[*] Build Docker image..."
+docker build -t "$IMAGE_NAME" .
+
+echo "[*] Hentikan container lama (jika ada)..."
+docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+
+echo "[*] Jalankan container baru dengan mount host folder..."
+docker run -d --name "$CONTAINER_NAME" \
+  -p 6000:6000/udp \
+  -v "$HOST_ASSETS_DIR:/assets" \
+  --restart unless-stopped \
+  "$IMAGE_NAME"
+
+echo
+echo "✅ Container 'ffmpeg' sudah berjalan!"
+echo "   Input  SRT → srt://:6000?mode=listener"
+echo "   Output SRT → srt://127.0.0.1:6002?mode=caller"
+echo
+echo "👉 Redownload asset: docker exec ffmpeg /entrypoint.sh --redownload"
+echo "👉 Ganti failover.mp4 / watermark.png manual: $HOST_ASSETS_DIR"
