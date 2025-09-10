@@ -2,7 +2,8 @@
 set -e  # Stop kalau ada error
 
 echo ">>> Update system & install dependencies..."
-sudo apt update && sudo apt upgrade -y
+sudo apt update && sudo apt -o Dpkg::Options::="--force-confold" upgrade -y
+#sudo apt update && sudo apt upgrade -y
 sudo apt install tclsh pkg-config libssl-dev build-essential make cmake tcl openssl zlib1g-dev gcc perl net-tools nano ssh git zip unzip ffmpeg ufw apt-transport-https ca-certificates curl software-properties-common -y
 
 echo ">>> Setup firewall..."
