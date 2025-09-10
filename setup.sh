@@ -1,11 +1,12 @@
 #!/bin/bash
-set -e  # Stop kalau ada error
+set -e
+export DEBIAN_FRONTEND=noninteractive
 
 echo ">>> Update system & install dependencies..."
 sudo apt update && sudo apt -o Dpkg::Options::="--force-confold" upgrade -y
-#sudo apt update && sudo apt upgrade -y
-sudo apt install tclsh pkg-config libssl-dev build-essential make cmake tcl openssl zlib1g-dev gcc perl net-tools nano ssh git zip unzip ffmpeg ufw apt-transport-https ca-certificates curl software-properties-common -y
-
+sudo apt install -y -o Dpkg::Options::="--force-confold" \
+  tclsh pkg-config libssl-dev build-essential make cmake tcl openssl zlib1g-dev gcc perl net-tools nano ssh git zip unzip ffmpeg ufw apt-transport-https ca-certificates curl software-properties-common
+  
 echo ">>> Setup firewall..."
 sudo ufw --force reset
 sudo ufw default deny incoming
