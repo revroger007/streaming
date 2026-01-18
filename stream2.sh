@@ -1,228 +1,194 @@
-#!/bin/bash
-
+#!/usr/bin/env bash
 # =============================================================================
-# Script Installer SRTLA + SRT + Restreamer (Versi Terbaru - Robust dengan Error Handling)
-# Dibuat ulang & dikomentari detail oleh Grok berdasarkan repo revroger007/streaming
-# Tujuan: Setup low-latency streaming dari Belabox → SRTLA → SRT → Restreamer
-# Dukungan: Ubuntu/Debian 22.04/24.04+, Restreamer 2.10.0+, SRT patched BELABOX
-#
-# Fitur Error Handling:
-# - Fungsi error_exit untuk handle kegagalan dengan pesan jelas & exit code
-# - Cek $? setelah command kritis
-# - Trap untuk cleanup jika Ctrl+C atau error tak terduga
-# - Cek prerequisite tools sebelum mulai
+# SRTLA + Restreamer + BELABOX setup script (versi lebih baik - 2026)
+# =============================================================================
+# Catatan: Dijalankan sebagai root di Ubuntu 22.04 / 24.04 / 26.04 (atau Debian 12+)
 # =============================================================================
 
-set -e  # Keluar jika command gagal (bisa di-override sementara dengan || true jika perlu)
+set -euo pipefail
+trap 'echo -e "\n${RED}ERROR: Script gagal di baris $LINENO${NC}" >&2; exit 1' ERR
 
-# Warna output
+# Warna untuk output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
-NC='\033[0m'
+NC='\033[0m' # No Color
 
-# Fungsi error handling utama
-error_exit() {
-    echo -e "${RED}ERROR: $1${NC}" >&2
-    echo -e "${RED}Script dihentikan. Kode exit: $2${NC}" >&2
-    exit "${2:-1}"
-}
+# Konfigurasi - mudah diubah di sini
+SRTLA_PORT=5000
+SRT_LOCAL_PORT=5002
+RESTREAMER_HTTP_PORT=8080
+RESTREAMER_RTMP_PORT=1935
+SRT_OUTPUT_PORT=6000
+INSTALL_DIR="/opt/belabox"
+LOG_FILE="/var/log/belabox-setup.log"
 
-# Fungsi untuk jalankan command & cek error
-run_cmd() {
-    echo "$1"
-    eval "$1" || error_exit "Gagal menjalankan: $1" 3
-}
+# ------------------------------------------------------------------------------
+echo -e "${GREEN}=== Belabox SRTLA + Restreamer Setup (Improved) ===${NC}"
+echo "Waktu mulai : $(date '+%Y-%m-%d %H:%M:%S')"
+echo
 
-# Trap untuk cleanup jika script diinterupsi (Ctrl+C, kill, dll)
-cleanup() {
-    echo -e "${YELLOW}Script diinterupsi. Membersihkan sementara...${NC}"
-    # Opsional: matikan service jika sudah dibuat
-    systemctl stop srtla-rec.service srt-rhei.service 2>/dev/null
-    docker compose -f /opt/restreamer/docker-compose.yml down 2>/dev/null
-    echo -e "${YELLOW}Cleanup selesai.${NC}"
-}
-trap cleanup EXIT ERR SIGINT SIGTERM
-
-echo -e "${GREEN}=== Mulai Install SRTLA + SRT + Restreamer Terbaru (Robust) ===${NC}"
-echo "Tanggal: $(date '+%Y-%m-%d %H:%M:%S')"
-echo "Pastikan kamu jalankan sebagai ROOT!"
-echo ""
-
-# ----------------------------------------------------------------------------
-# 1. Cek prerequisite tools dasar
-# ----------------------------------------------------------------------------
-for cmd in git make cmake curl wget ufw; do
-    command -v "$cmd" >/dev/null 2>&1 || error_exit "Tool '$cmd' tidak ditemukan. Install dulu dengan apt." 10
-done
-
-# ----------------------------------------------------------------------------
-# 2. Update & Upgrade Sistem + Install paket dasar
-# ----------------------------------------------------------------------------
-echo -e "${GREEN}Update & upgrade sistem...${NC}"
-apt update -y || error_exit "Gagal apt update" 11
-apt upgrade -y || error_exit "Gagal apt upgrade" 12
-apt install -y git make cmake tclsh pkg-config libssl-dev zlib1g-dev curl wget ufw net-tools build-essential || error_exit "Gagal install paket dasar" 13
-
-echo -e "${GREEN}Sistem update & paket dasar OK.${NC}"
-
-# ----------------------------------------------------------------------------
-# 3. Install Docker jika belum ada
-# ----------------------------------------------------------------------------
-if ! command -v docker >/dev/null 2>&1; then
-    echo -e "${GREEN}Install Docker...${NC}"
-    curl -fsSL https://get.docker.com -o get-docker.sh || error_exit "Gagal download installer Docker" 20
-    sh get-docker.sh || error_exit "Gagal install Docker" 21
-    rm get-docker.sh
-    usermod -aG docker "${USER:-root}"  # Tambah ke group docker
-else
-    echo -e "${GREEN}Docker sudah terinstall.${NC}"
+if [[ $EUID -ne 0 ]]; then
+    echo -e "${RED}Script ini harus dijalankan sebagai root (sudo)${NC}"
+    exit 1
 fi
 
-# Cek docker compose (v2+)
-if ! docker compose version >/dev/null 2>&1; then
-    error_exit "Docker Compose tidak ditemukan atau versi lama. Install manual: https://docs.docker.com/compose/install/" 22
+if ! grep -qiE 'ubuntu|debian' /etc/os-release; then
+    echo -e "${RED}Script ini hanya support Ubuntu / Debian saat ini${NC}"
+    exit 1
 fi
 
-# ----------------------------------------------------------------------------
-# 4. Input StreamID & Passphrase
-# ----------------------------------------------------------------------------
-echo ""
-read -p "Masukkan SRT StreamID (contoh: live/stream/belabox, kosongkan jika tidak pakai): " SRT_STREAMID
-read -p "Masukkan SRT Passphrase (kosongkan jika tidak pakai): " SRT_PASSPHRASE
+# ------------------------------------------------------------------------------
+echo -e "${YELLOW}1. Update sistem & install paket dasar...${NC}"
 
-SRT_PARAMS=""
-[ -n "$SRT_STREAMID" ] && SRT_PARAMS+="&streamid=$SRT_STREAMID"
-[ -n "$SRT_PASSPHRASE" ] && SRT_PARAMS+="&passphrase=$SRT_PASSPHRASE"
+export DEBIAN_FRONTEND=noninteractive
 
-echo -e "${GREEN}StreamID: ${SRT_STREAMID:-tidak dipakai}${NC}"
-echo -e "${GREEN}Passphrase: ${SRT_PASSPHRASE:-tidak dipakai}${NC}"
-echo ""
+{
+    apt-get update -qq
+    apt-get upgrade -y -o Dpkg::Options::="--force-confold" -o Dpkg::Options::="--force-confdef"
+    apt-get install -y --no-install-recommends \
+        build-essential cmake make gcc g++ pkg-config \
+        libssl-dev zlib1g-dev tclsh tcl-dev \
+        git curl wget nano net-tools ufw \
+        ca-certificates apt-transport-https software-properties-common \
+        ffmpeg zip unzip
+} | tee -a "$LOG_FILE"
 
-# ----------------------------------------------------------------------------
-# 5. Compile SRT patched BELABOX
-# ----------------------------------------------------------------------------
-cd /root || error_exit "Gagal cd /root" 30
+# ------------------------------------------------------------------------------
+echo -e "${YELLOW}2. Konfigurasi firewall (UFW)...${NC}"
 
-if [ ! -d "srt" ]; then
-    git clone https://github.com/BELABOX/srt.git || error_exit "Gagal clone BELABOX/srt" 31
-fi
-cd srt || error_exit "Gagal cd srt" 32
+ufw --force reset >/dev/null 2>&1 || true
+ufw default deny incoming
+ufw default allow outgoing
 
-./configure || error_exit "Gagal configure SRT" 33
-make -j$(nproc) || error_exit "Gagal make SRT" 34
-make install || error_exit "Gagal make install SRT" 35
-ldconfig || error_exit "Gagal ldconfig" 36
+ufw allow ssh comment "SSH access"
+ufw allow "$SRTLA_PORT/udp" comment "SRTLA input (Belabox)"
+ufw allow "$RESTREAMER_RTMP_PORT/tcp" comment "RTMP output"
+ufw allow 5001/udp comment "SRT output (opsional)"
+ufw allow "$RESTREAMER_HTTP_PORT/tcp" comment "Restreamer Web UI"
+ufw allow 9090/tcp comment "Monitoring (opsional)"
+ufw --force enable
 
-# ----------------------------------------------------------------------------
-# 6. Compile SRTLA
-# ----------------------------------------------------------------------------
-cd /root || error_exit "Gagal cd /root" 40
+ufw status | grep -E 'ALLOW|DENY'
 
-if [ ! -d "srtla" ]; then
-    git clone https://github.com/BELABOX/srtla.git || error_exit "Gagal clone BELABOX/srtla" 41
-fi
-cd srtla || error_exit "Gagal cd srtla" 42
-make -j$(nproc) || error_exit "Gagal make SRTLA" 43
+# ------------------------------------------------------------------------------
+echo -e "${YELLOW}3. Build SRT & SRTLA...${NC}"
 
-# ----------------------------------------------------------------------------
-# 7. Setup Restreamer Docker
-# ----------------------------------------------------------------------------
-mkdir -p /opt/restreamer/{config,data} || error_exit "Gagal buat direktori Restreamer" 50
+mkdir -p "$INSTALL_DIR"
+cd "$INSTALL_DIR"
 
-cat <<EOF > /opt/restreamer/docker-compose.yml || error_exit "Gagal buat docker-compose.yml" 51
-version: '3.8'
+rm -rf srt srtla 2>/dev/null || true
+
+echo "→ Cloning & building SRTLA..."
+git clone --depth 1 https://github.com/BELABOX/srtla.git
+cd srtla
+make clean >/dev/null 2>&1 || true
+make -j"$(nproc)"
+cd ..
+
+echo "→ Cloning & building SRT..."
+git clone --depth 1 https://github.com/BELABOX/srt.git
+cd srt
+./configure --prefix=/usr/local
+make -j"$(nproc)"
+make install
+cd ..
+
+# ------------------------------------------------------------------------------
+echo -e "${YELLOW}4. Membuat systemd services...${NC}"
+
+cat > /etc/systemd/system/srtla-receiver.service <<EOF
+[Unit]
+Description=SRTLA Receiver (Belabox input)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=$INSTALL_DIR/srtla
+ExecStart=$INSTALL_DIR/srtla/srtla_rec $SRTLA_PORT 127.0.0.1 $SRT_LOCAL_PORT
+Restart=always
+RestartSec=4
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+cat > /etc/systemd/system/srt-forwarder.service <<EOF
+[Unit]
+Description=SRT forwarder to Restreamer
+After=network-online.target srtla-receiver.service
+Requires=srtla-receiver.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=$INSTALL_DIR/srt
+ExecStart=/usr/local/bin/srt-live-transmit \
+    "srt://127.0.0.1:$SRT_LOCAL_PORT?mode=listener&latency=2000" \
+    "srt://127.0.0.1:$SRT_OUTPUT_PORT?mode=caller"
+Restart=always
+RestartSec=4
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable --now srtla-receiver srt-forwarder
+
+systemctl status --no-pager srtla-receiver srt-forwarder
+
+# ------------------------------------------------------------------------------
+echo -e "${YELLOW}5. Install Docker & Docker Compose (cara resmi 2025+)...${NC}"
+
+install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+chmod a+r /etc/apt/keyrings/docker.asc
+
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
+    tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+apt-get update -qq
+apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+
+systemctl enable --now docker
+
+# ------------------------------------------------------------------------------
+echo -e "${YELLOW}6. Setup Restreamer (datarhei)...${NC}"
+
+mkdir -p /opt/restreamer/config /opt/restreamer/data
+
+cat > /opt/restreamer/docker-compose.yml <<EOF
 services:
   restreamer:
     image: datarhei/restreamer:latest
     container_name: restreamer
-    restart: always
+    restart: unless-stopped
     privileged: true
-    ports:
-      - 8080:8080/tcp
-      - 8181:8181/tcp
-      - 1935:1935/tcp
-      - 1936:1936/tcp
-      - 6000:6000/udp
+    network_mode: host          # <-- lebih simpel untuk RTMP/SRT
     volumes:
       - /opt/restreamer/config:/core/config
       - /opt/restreamer/data:/core/data
     environment:
-      - RS_USERNAME=admin
-      - RS_PASSWORD=admin
+      - RESTREAMER_UI_PORT=$RESTREAMER_HTTP_PORT
 EOF
 
-cd /opt/restreamer || error_exit "Gagal cd /opt/restreamer" 52
-docker compose pull || error_exit "Gagal pull Restreamer image" 53
-docker compose up -d || error_exit "Gagal start Restreamer container" 54
+cd /opt/restreamer
+docker compose pull
+docker compose up -d
 
-# ----------------------------------------------------------------------------
-# 8. Buat systemd services
-# ----------------------------------------------------------------------------
-cat <<EOF > /etc/systemd/system/srtla-rec.service || error_exit "Gagal buat srtla-rec.service" 60
-[Unit]
-Description=SRTLA Receiver (BELABOX bonding)
-After=network.target
-
-[Service]
-ExecStart=/root/srtla/srtla_rec 5000 127.0.0.1 5002 1
-Restart=always
-User=root
-StandardOutput=journal
-StandardError=journal
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-cat <<EOF > /etc/systemd/system/srt-rhei.service || error_exit "Gagal buat srt-rhei.service" 61
-[Unit]
-Description=SRT Relay: 5002 → Restreamer 6000
-After=network.target docker.service
-Requires=docker.service
-
-[Service]
-ExecStart=/root/srt/srt-live-transmit "srt://127.0.0.1:5002?mode=listener&latency=2000${SRT_PARAMS}" "srt://127.0.0.1:6000?mode=caller"
-Restart=always
-User=root
-StandardOutput=journal
-StandardError=journal
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-# ----------------------------------------------------------------------------
-# 9. Aktifkan services & firewall
-# ----------------------------------------------------------------------------
-systemctl daemon-reload || error_exit "Gagal daemon-reload" 70
-systemctl enable --now srtla-rec.service || error_exit "Gagal enable/start srtla-rec" 71
-systemctl enable --now srt-rhei.service || error_exit "Gagal enable/start srt-rhei" 72
-
-ufw allow OpenSSH || true
-ufw allow 5000/udp || true
-ufw allow 6000/udp || true
-ufw allow 8080/tcp || true
-ufw allow 1935/tcp || true
-ufw --force enable || error_exit "Gagal enable UFW" 73
-
-# ----------------------------------------------------------------------------
-# 10. Final status & instruksi
-# ----------------------------------------------------------------------------
-echo ""
-echo -e "${GREEN}=== Setup Selesai (semua tahap OK)! ===${NC}"
-systemctl status srtla-rec.service --no-pager -l | head -n 10
-echo ""
-systemctl status srt-rhei.service --no-pager -l | head -n 10
-echo ""
-docker ps | grep restreamer || echo -e "${YELLOW}Container Restreamer tidak terlihat? Cek 'docker logs restreamer'${NC}"
-
-echo -e "${GREEN}Langkah selanjutnya:${NC}"
-echo "1. Buka: http://$(hostname -I | awk '{print $1}'):8080 → admin/admin"
-echo "2. Setup SRT Listener: Port 6000, Latency 2000ms, StreamID sesuai input"
-echo "3. Tes Belabox: srtla://IP_KAMU:5000"
-echo ""
-echo "Log pantau: journalctl -u srt-rhei.service -f"
-echo "Edit config: sudo nano /etc/systemd/system/srt-rhei.service → daemon-reload & restart"
-echo ""
-echo -e "${GREEN}Jika ada error selama install, copy pesan ERROR merah & share!${NC}"
+echo
+echo -e "${GREEN}Setup selesai!${NC}"
+echo
+echo "→ Web UI Restreamer     : http://$(hostname -I | awk '{print $1}'):$RESTREAMER_HTTP_PORT"
+echo "→ SRTLA mendengarkan    : UDP port $SRTLA_PORT"
+echo "→ SRT ke Restreamer     : port $SRT_OUTPUT_PORT (localhost)"
+echo "→ RTMP keluar           : rtmp://$(hostname -I | awk '{print $1}'):$RESTREAMER_RTMP_PORT/..."
+echo
+echo "Cek status:"
+echo "  systemctl status srtla-receiver srt-forwarder"
+echo "  docker compose -f /opt/restreamer/docker-compose.yml ps"
+echo
+echo -e "Semoga lancar streaming-nya! 🚀"
